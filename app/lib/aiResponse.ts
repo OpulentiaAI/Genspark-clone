@@ -84,24 +84,82 @@ export const getAIResponse = async (
       }
 
       else{
-        const response = await ai.models.generateContentStream({
-          model: selectedModel,
-          contents: contents,
-          config: {
-            tools: [{googleSearch: {}}],
-          },
-        }); 
+        try {
+          const response = await ai.models.generateContentStream({
+            model: selectedModel,
+            contents: contents,
+            config: {
+              tools: [{ googleSearch: {} }],
+            },
+          });
 
-        
-        let fullResponse = '';
-        for await (const chunk of response) {
-          if (chunk.text === undefined) {
-            continue;
+          let fullResponse = '';
+          for await (const chunk of response) {
+            if (chunk.text === undefined) {
+              continue;
+            }
+            fullResponse += chunk.text;
+            onSendMessage(fullResponse, false);
           }
-          fullResponse += chunk.text;
-          onSendMessage(fullResponse, false);
+          onStreamEnd?.();
+        } catch (err) {
+          try {
+            const res = await fetch('/api/superagent', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ query: message ?? '', numResults: 5 }),
+            });
+            if (!res.ok) {
+              throw new Error('Fallback search failed');
+            }
+            const data = await res.json();
+            const { results = [], provider } = data || {} as any;
+            const webContext = `Web results (provider: ${provider || 'unknown'}):\n` +
+              (results as Array<any>).map((r: any, i: number) => `${i + 1}. ${r.title || ''}\n${r.url || ''}\n${r.snippet || ''}`).join('\n\n');
+
+            const augmented = messages.map(msg => ({
+              role: msg.isUser ? 'user' : 'model',
+              parts: [{ text: msg.text }]
+            }));
+            augmented.push({
+              role: 'user',
+              parts: [{ text: `${message ?? ''}\n\nUse these web results to answer and cite sources as [1], [2], etc.:\n\n${webContext}` }]
+            });
+
+            const response2 = await ai.models.generateContentStream({
+              model: selectedModel,
+              contents: augmented,
+            });
+
+            let fullResponse2 = '';
+            for await (const chunk of response2) {
+              if (chunk.text === undefined) {
+                continue;
+              }
+              fullResponse2 += chunk.text;
+              onSendMessage(fullResponse2, false);
+            }
+            onStreamEnd?.();
+          } catch (fallbackErr) {
+            onSendMessage('검색 도구에 문제가 발생했습니다. 웹 검색 없이 답변을 제공합니다.', false);
+            const fallbackContents = messages.map(msg => ({
+              role: msg.isUser ? 'user' : 'model',
+              parts: [{ text: msg.text }]
+            }));
+            fallbackContents.push({ role: 'user', parts: [{ text: message ?? '' }] });
+            const response3 = await ai.models.generateContentStream({
+              model: selectedModel,
+              contents: fallbackContents,
+            });
+            let text3 = '';
+            for await (const chunk of response3) {
+              if (chunk.text === undefined) continue;
+              text3 += chunk.text;
+              onSendMessage(text3, false);
+            }
+            onStreamEnd?.();
+          }
         }
-        onStreamEnd?.();
       }
     }
   } catch (error) {
